@@ -1,7 +1,14 @@
 import sys
 import os
 import signal
-from multiprocessing import freeze_support
+
+# Limit OpenBLAS to a single thread so that parallel BLAS routines
+# (e.g. dgetrf_parallel used by numpy.linalg.inv) do not overflow the
+# modest 512 KB default stack of QThread worker threads.  Must be set
+# before numpy / scipy are imported.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
+from multiprocessing import freeze_support, set_start_method
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtWidgets import QApplication
 # FlatCAM imports
@@ -41,6 +48,11 @@ def main():
 		case [_, '-h' | '-H']:
 			print('HELP')
 			os._exit(0)
+	try:
+		set_start_method('spawn', force=True)
+	except RuntimeError:
+		# Start method can be already configured by parent/frozen bootstrap.
+		pass
 	App.version
 
 	# All X11 calling should be thread safe otherwise we have strange issues

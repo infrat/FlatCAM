@@ -40,7 +40,7 @@ import gc
 from xml.dom.minidom import parseString as parse_xml_string
 
 from multiprocessing.connection import Listener, Client
-from multiprocessing import Pool
+from multiprocessing import get_context
 import socket
 import argparse
 
@@ -155,7 +155,7 @@ class App(QtCore.QObject):
 	parser.add_argument('--headless', action='store_true')
 	parser.add_argument('-V', '--version', action='store_true', help='show version')
 	parser.add_argument('misc', nargs='*', help='commands: quit, exit, save; file path: .FlatPrj, .FlatConfig, .FlatScript, .TCL')
-	args = parser.parse_args()
+	args, unknown_args = parser.parse_known_args()
 	del parser
 
 	if args.version:
@@ -165,7 +165,12 @@ class App(QtCore.QObject):
 	cmd_line_shellfile = args.shellfile
 	cmd_line_shellvar = args.shellvar
 	cmd_line_headless = args.headless
-	args = args.misc
+	# In frozen builds, multiprocessing may re-enter the executable with Python flags
+	# like -B/-S/-I/-c and internal spawn args; those must not be treated as app args.
+	if {'-B', '-S', '-I', '-c'} & set(unknown_args) or '--multiprocessing-fork' in unknown_args:
+		args = args.misc
+	else:
+		args = args.misc + unknown_args
 	log.info(f'{args=}')
 
 	engine = '3D'
@@ -240,6 +245,11 @@ class App(QtCore.QObject):
 
 	# Emitted when multiprocess pool has been recreated
 	pool_recreated = QtCore.pyqtSignal(object)
+
+	@staticmethod
+	def _create_pool():
+		"""Use explicit spawn context for macOS/frozen stability."""
+		return get_context('spawn').Pool()
 
 	# Emitted when an unhandled exception happens
 	# in the worker task.
@@ -440,7 +450,7 @@ class App(QtCore.QObject):
 		# ###########################################################################################################
 		# ###################################### CREATE MULTIPROCESSING POOL #######################################
 		# ###########################################################################################################
-		self.pool = Pool()
+		self.pool = self._create_pool()
 
 		# ###########################################################################################################
 		# ###################################### Clear GUI Settings - once at first start ###########################
@@ -1878,16 +1888,25 @@ class App(QtCore.QObject):
 
 		fcTranslate.restart_program(app=self)
 
-	def clear_pool(self):
+	def clear_pool(self, recreate=True):
 		"""
-		Clear the multiprocessing pool and calls garbage collector.
+		Clear the multiprocessing pool and optionally recreate it.
 
+		:param recreate: If True, create a fresh pool after cleanup.
 		:return: None
 		"""
-		self.pool.close()
+		if getattr(self, 'pool', None) is not None:
+			try:
+				self.pool.terminate()
+				self.pool.join()
+			except Exception as err:
+				self.log.debug(f"Pool cleanup failed: {err}")
 
-		self.pool = Pool()
-		self.pool_recreated.emit(self.pool)
+		if recreate:
+			self.pool = self._create_pool()
+			self.pool_recreated.emit(self.pool)
+		else:
+			self.pool = None
 
 		gc.collect()
 
@@ -3643,7 +3662,7 @@ class App(QtCore.QObject):
 
 		# terminate workers
 		# self.workers.__del__()
-		self.clear_pool()
+		self.clear_pool(recreate=False)
 		self.log.debug('Pool cleared.')
 
 		# quit app by signalling for self.kill_app() method

@@ -1,0 +1,113 @@
+name: Build FlatCAM macOS package
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: |
+            FlatCAM/requirements.txt
+
+      - name: Install system libraries
+        shell: bash
+        run: |
+          brew install cairo pkg-config
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          # Strip --hash flags so pip can resolve ARM64 wheels / build from source
+          sed -E 's/ *--hash=sha256:[a-f0-9]+//g; s/ *\\$//;' FlatCAM/requirements.txt \
+            | grep -v '^[[:space:]]*$' > /tmp/requirements_nohash.txt
+          pip install -r /tmp/requirements_nohash.txt
+          pip install pyinstaller language_data
+
+      - name: Compile Qt resources
+        shell: bash
+        run: |
+          pyrcc5 FlatCAM/resources.qrc -o FlatCAM/resources.py
+          pyrcc5 FlatCAM/resources_dark.qrc -o FlatCAM/resources_dark.py
+
+      - name: Build app bundle with PyInstaller
+        shell: bash
+        run: |
+          rm -rf build dist
+          pyinstaller --clean -y flatcam.spec
+
+      - name: Smoke test app startup
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./dist/FlatCAM.app/Contents/MacOS/FlatCAM > /tmp/flatcam_ci_run.log 2>&1 &
+          APP_PID=$!
+
+          # Give the GUI app time to initialize and trigger dynamic imports.
+          sleep 12
+
+          if kill -0 "$APP_PID" 2>/dev/null; then
+            kill "$APP_PID" 2>/dev/null || true
+            wait "$APP_PID" 2>/dev/null || true
+          fi
+
+          echo "=== FlatCAM startup log (head) ==="
+          head -n 200 /tmp/flatcam_ci_run.log || true
+
+          if grep -Eiq "Traceback|ModuleNotFoundError|unrecognized arguments: -B -S -I -c" /tmp/flatcam_ci_run.log; then
+            echo "Critical startup errors detected in FlatCAM log."
+            exit 1
+          fi
+
+      - name: Create DMG package
+        shell: bash
+        run: |
+          rm -f FlatCAM.dmg
+          hdiutil create -volname "FlatCAM" -srcfolder dist/FlatCAM.app -ov -format UDZO FlatCAM.dmg
+
+      - name: Package FlatCAM.app for upload
+        shell: bash
+        run: |
+          cd dist && zip -r -y ../FlatCAM-app.zip FlatCAM.app
+
+      - name: Upload FlatCAM.app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlatCAM-app-macos
+          path: FlatCAM-app.zip
+          if-no-files-found: error
+
+      - name: Upload FlatCAM.dmg artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlatCAM-dmg-macos
+          path: FlatCAM.dmg
+          if-no-files-found: error
+
+      - name: Upload build logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FlatCAM-build-logs
+          path: |
+            /tmp/flatcam_ci_run.log
+            build/flatcam/warn-flatcam.txt
+            build/flatcam/xref-flatcam.html
+          if-no-files-found: warn

@@ -12,8 +12,44 @@ from vispy.gloo import set_state
 from vispy.color import Color
 from shapely.geometry import Polygon, LineString, LinearRing
 import threading
+import queue as _queue
 import numpy as np
+from PyQt5.QtCore import QObject, QMetaObject, Qt, pyqtSlot, QCoreApplication
 from appGUI.VisPyTesselators import GLUTess
+
+
+class _MainThreadDispatcher(QObject):
+	"""Thread-safe dispatcher: schedules callables on the Qt main thread.
+
+	Create one instance on the main thread (e.g. inside a Visual __init__
+	that is always called during GUI setup).  Any thread can then call
+	``call_on_main(fn)`` and *fn* will be executed in the main-thread event
+	loop.  This prevents bus-errors caused by VisPy/OpenGL operations being
+	invoked from background worker QThreads on macOS.
+	"""
+
+	def __init__(self):
+		super().__init__()
+		self._queue = _queue.SimpleQueue()
+		# Unconditionally move this object to the main thread so that
+		# QueuedConnection events are always processed there, regardless of
+		# which thread (worker, editor init, etc.) creates the ShapeCollection.
+		app = QCoreApplication.instance()
+		if app is not None:
+			self.moveToThread(app.thread())
+
+	def call_on_main(self, fn):
+		"""Queue *fn* to be called on the main thread. Safe from any thread."""
+		self._queue.put(fn)
+		QMetaObject.invokeMethod(self, "_process", Qt.QueuedConnection)
+
+	@pyqtSlot()
+	def _process(self):
+		try:
+			fn = self._queue.get_nowait()
+			fn()
+		except _queue.Empty:
+			pass
 
 
 class FlatCAMLineVisual(LineVisual):
@@ -237,6 +273,9 @@ class ShapeCollectionVisual(CompoundVisual):
 		# Process pool
 		self.pool = pool
 		self.results = {}
+
+		# Dispatcher used in redraw() to ensure GPU work runs on the main thread.
+		self._dispatcher = _MainThreadDispatcher()
 
 		self._meshes = [MeshVisual() for _ in range(0, layers)]
 		# self._lines = [LineVisual(antialias=True) for _ in range(0, layers)]
@@ -560,17 +599,26 @@ class ShapeCollectionVisual(CompoundVisual):
 
 		self.results_lock.release()
 
+		# VisPy / OpenGL calls inside __update() and update_color() must run on
+		# the main thread.  When plot() is executed by a background QThread worker
+		# we dispatch the GPU work back to the main-thread event loop.
 		if update_colors is None or update_colors is False:
-			self.__update()
+			self._dispatcher.call_on_main(lambda: self.__update())
 		else:
-			try:
-				self.update_color(
-					new_mesh_color=update_colors[0],
-					new_line_color=update_colors[1],
-					indexes=indexes
-				)
-			except Exception as e:
-				print("VisPyVisuals.ShapeCollectionVisual.redraw() --> Update colors error = %s." % str(e))
+			uc = update_colors
+			idx = indexes
+
+			def _do_update_colors():
+				try:
+					self.update_color(
+						new_mesh_color=uc[0],
+						new_line_color=uc[1],
+						indexes=idx
+					)
+				except Exception as e:
+					print("VisPyVisuals.ShapeCollectionVisual.redraw() --> Update colors error = %s." % str(e))
+
+			self._dispatcher.call_on_main(_do_update_colors)
 
 	def lock_updates(self):
 		self.update_lock.acquire(True)

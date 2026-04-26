@@ -25,6 +25,7 @@ class WorkerStack(QtCore.QObject):
 			thread.started.connect(worker.run)
 			worker.task_completed.connect(self.on_task_completed)
 
+			thread.setStackSize(8 * 1024 * 1024)  # 8 MB – default 512 KB is too small
 			thread.start(QtCore.QThread.NormalPriority)
 
 			self.workers.append(worker)
