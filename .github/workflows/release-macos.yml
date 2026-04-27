@@ -1,22 +1,42 @@
-name: Build FlatCAM macOS package
+name: Release FlatCAM macOS package
 
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
+    inputs:
+      version:
+        description: "Release version (e.g. 2026.4.1)"
+        required: true
+        type: string
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  build-macos:
+  release-macos:
     runs-on: macos-14
     timeout-minutes: 90
 
     steps:
+      - name: Validate version format
+        shell: bash
+        run: |
+          if [[ ! "${{ inputs.version }}" =~ ^[0-9]{4}\.[0-9]{1,2}\.[0-9]+$ ]]; then
+            echo "::error::Invalid version format '${{ inputs.version }}'. Expected YYYY.M.PATCH (e.g. 2026.4.1)"
+            exit 1
+          fi
+
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check tag does not already exist
+        shell: bash
+        run: |
+          if git rev-parse "v${{ inputs.version }}" >/dev/null 2>&1; then
+            echo "::error::Tag v${{ inputs.version }} already exists."
+            exit 1
+          fi
 
       - name: Set up Python 3.10
         uses: actions/setup-python@v5
@@ -60,7 +80,6 @@ jobs:
           ./dist/FlatCAM.app/Contents/MacOS/FlatCAM > /tmp/flatcam_ci_run.log 2>&1 &
           APP_PID=$!
 
-          # Give the GUI app time to initialize and trigger dynamic imports.
           sleep 12
 
           if kill -0 "$APP_PID" 2>/dev/null; then
@@ -87,25 +106,29 @@ jobs:
         run: |
           cd dist && zip -r -y ../FlatCAM-app.zip FlatCAM.app
 
-      - name: Upload FlatCAM.app artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: FlatCAM-app-macos
-          path: FlatCAM-app.zip
-          if-no-files-found: error
+      - name: Create Git tag
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "v${{ inputs.version }}" -m "Release v${{ inputs.version }}"
+          git push origin "v${{ inputs.version }}"
 
-      - name: Upload FlatCAM.dmg artifact
-        uses: actions/upload-artifact@v4
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
         with:
-          name: FlatCAM-dmg-macos
-          path: FlatCAM.dmg
-          if-no-files-found: error
+          tag_name: v${{ inputs.version }}
+          name: FlatCAM ${{ inputs.version }} (macOS Apple Silicon)
+          generate_release_notes: true
+          files: |
+            FlatCAM-app.zip
+            FlatCAM.dmg
 
       - name: Upload build logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: FlatCAM-build-logs
+          name: FlatCAM-release-build-logs
           path: |
             /tmp/flatcam_ci_run.log
             build/flatcam/warn-flatcam.txt
