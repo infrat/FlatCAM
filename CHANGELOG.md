@@ -8,6 +8,12 @@ CHANGELOG for FlatCAM beta
 
 =================================================
 
+04.2026
+
+- Created a fork aimed at migrating FlatCAM to macOS Apple Silicon (arm64)
+- Added GitHub Actions CI/CD pipeline that builds a native .app bundle and .dmg installer using PyInstaller
+- Automated release creation on push to main branch (CalVer versioning starting from 2026.4.1)
+
 04.2024
 
 - move publish process to zipapp
